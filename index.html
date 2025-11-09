@@ -34,7 +34,8 @@
 
     document.addEventListener('DOMContentLoaded', function() {
       let currentRouteLayer;
-      const map = L.map('map').setView([13.736717, 100.523186], 12);
+    //   const map = L.map('map').setView([13.736717, 100.523186], 12);
+      const map = L.map('map').setView([-23.5964588,-46.6886217], 12);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap contributors'
@@ -147,7 +148,7 @@ submitBtn.addEventListener('click', async () => {
     });
 
     console.log({ nodes: orderedWaypoints, links });
-    alert('เส้นทาง optimized ถูกสร้างแล้ว ดู console สำหรับรายละเอียด');
+    // alert('เส้นทาง optimized ถูกสร้างแล้ว ดู console สำหรับรายละเอียด');
   } catch (err) {
     console.error('OSRM Error:', err);
     alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
