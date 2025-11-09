@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Map — เลือกจุดบนแผนที่ (Leaflet + OSM + OSRM Matrix)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html,body,#map { height: 100%; margin: 0; padding: 0; }
+    .sidebar {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      background: rgba(255,255,255,0.95); border-radius: 8px; padding: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+      width: 320px; max-height: calc(100% - 40px); overflow: auto;
+    }
+    .btn { display:inline-block; padding:6px 10px; border-radius:6px; background:#1976d2; color:#fff; text-decoration:none; cursor:pointer; margin-right:6px; font-size:13px; }
+    .btn.ghost { background:transparent; color:#1976d2; border:1px solid rgba(25,118,210,0.12); }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="sidebar">
+    <h3>เลือกวันที่</h3>
+    <input type="date" id="datePicker">
+    <button class="btn" id="submitBtn" style="background:#388e3c; color:white; margin-top:10px;">Submit</button>
+  </div>
+    <script>
+      const datePicker = document.getElementById('datePicker');
+
+      // สร้าง callback function ชื่อ "callback"
+      function setDate(data) {
+          const dates = data.date;
+          if (dates.length > 0) {
+              const startDate = dates[0];
+              const endDate = dates[dates.length - 1];
+
+              datePicker.min = startDate;
+              datePicker.max = endDate;
+              datePicker.value = startDate;
+          }
+      }
+    </script>
+    </script>
+    <script src="unique_dates_sorted.js"></script>  
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>  
+    <script src="https://cdn.jsdelivr.net/npm/@mapbox/polyline@1.1.1/src/polyline.js"></script>
+
+    <script>
+let currentMarkers = [];
+let map; // map ของ leaflet
+let currentRouteLayer;
+let startPoint = [-23.5964588,-46.6886217]
+// สร้าง map
+document.addEventListener('DOMContentLoaded', function() {
+    
+    map = L.map('map').setView(startPoint, 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+    document.getElementById('submitBtn').click();
+});
+
+// ฟังก์ชันสำหรับโหลด marker จาก lat/lng
+function addMarker(lat, lng, label) {
+  console.log(lat, lng, label);
+    // const marker = L.marker([lat, lng]).addTo(map);
+    const index = currentMarkers.length + 1; 
+        const marker = L.marker([lat, lng], { 
+            draggable: true,
+            icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div style="background:#1976d2;color:#fff;border-radius:50%;width:24px;height:24px;line-height:24px;text-align:center;font-size:12px;">${index}</div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+            })
+        }).addTo(map);
+    if(label) marker.bindPopup(label);
+    currentMarkers.push(marker);
+}
+
+// ฟังก์ชันล้าง marker เดิม
+function clearMarkers() {
+    currentMarkers.forEach(m => map.removeLayer(m));
+    if (typeof currentRouteLayer !== 'undefined' && currentRouteLayer !== null) {
+      // currentRouteLayer มีอยู่แล้ว
+      map.removeLayer(currentRouteLayer);
+    }
+    currentMarkers = [];
+}
+
+// ฟังก์ชัน callback จาก JSONP
+function loadOrders(data) {
+  
+    const datePicker = document.getElementById('datePicker');
+    
+    document.getElementById('submitBtn').addEventListener('click', async () => {
+        clearMarkers();
+        const selectedDate = datePicker.value;
+
+        if(!selectedDate) return alert('กรุณาเลือกวันที่');
+
+        const dayData = data.orders.find(d => d.date === selectedDate);
+        if(!dayData) return alert('ไม่พบข้อมูลสำหรับวันที่นี้');
+        console.log(dayData);
+        addMarker(startPoint[0], startPoint[1], `start point`);
+        // วาง marker ทุกจุดจาก orders
+        dayData.detail.forEach(zipEntry => {
+          
+            addMarker(zipEntry.lat, zipEntry.long, `Zip: ${zipEntry.prefixZip}, Orders: ${zipEntry.detail.length}`);
+        });
+
+        // fit map
+        if(currentMarkers.length > 0) {
+            const group = new L.featureGroup(currentMarkers);
+            map.fitBounds(group.getBounds());
+        }
+
+        const coords = currentMarkers.map(m => `${m.getLatLng().lng},${m.getLatLng().lat}`).join(';');
+        const url = `https://router.project-osrm.org/trip/v1/driving/${coords}?source=first&roundtrip=true&overview=full`;
+          
+        try {
+          const res = await fetch(url);
+          const data = await res.json();
+
+          if (!data.trips || data.trips.length === 0) {
+            console.error('No trip found:', data);
+            alert('ไม่พบเส้นทางจาก OSRM');
+            return;
+          }
+
+          const trip = data;
+
+          // decode เส้นทางทั้งหมด
+          const decoded = polyline.decode(trip.trips[0].geometry, 6);
+          const latlngs = decoded.map(([lat, lon]) => [lat*10, lon*10]);
+          console.log(decoded);
+          // ลบเส้นทางเดิมก่อน (ถ้ามี)
+          if (currentRouteLayer) {
+          map.removeLayer(currentRouteLayer);
+          }
+
+          // วาดเส้นใหม่บนแผนที่
+          currentRouteLayer = L.polyline(latlngs, { color: 'blue', weight: 5 }).addTo(map);
+          map.fitBounds(currentRouteLayer.getBounds());
+
+
+          // ดึง waypoint ตามลำดับ optimized
+          const orderedWaypoints = trip.waypoints
+            .sort((a, b) => a.waypoint_index - b.waypoint_index)
+            .map((wp, i) => ({
+              id: i + 1,
+              lat: wp.location[1],
+              lng: wp.location[0],
+              name: wp.name || `Node ${i + 1}`
+            }));
+
+          // แสดงเส้นทางบน map ด้วย polyline
+          // const routeCoordinates = L.Polyline.fromEncoded(trip.trips[0].geometry); // ต้องใช้ polyline decoder
+          // routeCoordinates.addTo(map);
+
+          // สร้าง links แบบ directed + weight จาก legs
+          const links = [];
+          trip.trips[0].legs.forEach((leg, i) => {
+            const source = i + 1;
+            const target = (i + 1) % orderedWaypoints.length + 1; // wrap-around กลับ start
+            links.push({
+              source,
+              target,
+              weight: leg.distance
+            });
+          });
+
+          console.log({ nodes: orderedWaypoints, links });
+          //alert('เส้นทาง optimized ถูกสร้างแล้ว ดู console สำหรับรายละเอียด');
+        } catch (err) {
+          console.error('OSRM Error:', err);
+          alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
+        }
+    });
+    
+}
+</script>
+
+<script src="nested_orders.js"></script>
+</body>
+</html>
