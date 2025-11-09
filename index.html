@@ -105,9 +105,8 @@
           }
 
           const result = { nodes, links };
-          console.log('Full directed graph data (all combinations):', result);
-          alert('สร้างข้อมูล Node-Link (ทุกคู่ทั้งไปและกลับ) เสร็จสิ้น ดูผลได้ใน Console');
-          console.log(solveTSP(nodes, links));
+          let path = solveTSP(nodes, links);
+          alert(path.path);
         } catch (err) {
           console.error('OSRM Error:', err);
           alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
@@ -156,4 +155,5 @@
 
   </script>
 </body>
+
 </html>
