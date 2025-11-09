@@ -27,9 +27,13 @@
     <ol id="points"></ol>
   </div>
 
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <script>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>  
+    <script src="https://cdn.jsdelivr.net/npm/@mapbox/polyline@1.1.1/src/polyline.js"></script>
+
+    <script>
+
     document.addEventListener('DOMContentLoaded', function() {
+      let currentRouteLayer;
       const map = L.map('map').setView([13.736717, 100.523186], 12);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
@@ -41,7 +45,16 @@
       const submitBtn = document.getElementById('submitBtn');
 
       function addMarker(latlng) {
-        const marker = L.marker(latlng, { draggable: true }).addTo(map);
+        const index = markers.length + 1; 
+        const marker = L.marker(latlng, { 
+            draggable: true,
+            icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div style="background:#1976d2;color:#fff;border-radius:50%;width:24px;height:24px;line-height:24px;text-align:center;font-size:12px;">${index}</div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+            })
+        }).addTo(map);
         marker.on('dragend', updateList);
         markers.push(marker);
         updateList();
@@ -69,91 +82,79 @@
       document.getElementById('clearAll').addEventListener('click', () => {
         markers.forEach(m => map.removeLayer(m));
         markers.length = 0;
+        map.removeLayer(currentRouteLayer);
         updateList();
       });
 
       // Submit button logic
-      submitBtn.addEventListener('click', async () => {
-        if (markers.length < 2) return;
+submitBtn.addEventListener('click', async () => {
+  if (markers.length < 2) return;
 
-        const coords = markers.map(m => `${m.getLatLng().lng},${m.getLatLng().lat}`).join(';');
-        const url = `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
+  // สร้าง coordinates string สำหรับ OSRM Trip API
+  const coords = markers.map(m => `${m.getLatLng().lng},${m.getLatLng().lat}`).join(';');
+  const url = `https://router.project-osrm.org/trip/v1/driving/${coords}?source=first&roundtrip=true&overview=full`;
+    
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
 
-        try {
-          const res = await fetch(url);
-          const data = await res.json();
+    if (!data.trips || data.trips.length === 0) {
+      console.error('No trip found:', data);
+      alert('ไม่พบเส้นทางจาก OSRM');
+      return;
+    }
 
-          if (!data.distances) {
-            console.error('No matrix found:', data);
-            alert('ไม่พบข้อมูลระยะทางจาก OSRM');
-            return;
-          }
+    const trip = data;
 
-          const nodes = markers.map((m, i) => ({ id: i+1, lat: m.getLatLng().lat, lng: m.getLatLng().lng }));
-          const links = [];
+    // decode เส้นทางทั้งหมด
+    const decoded = polyline.decode(trip.trips[0].geometry, 6);
+    const latlngs = decoded.map(([lat, lon]) => [lat*10, lon*10]);
+    console.log(decoded);
+    // ลบเส้นทางเดิมก่อน (ถ้ามี)
+    if (currentRouteLayer) {
+    map.removeLayer(currentRouteLayer);
+    }
 
-          for (let i = 0; i < data.distances.length; i++) {
-            for (let j = 0; j < data.distances.length; j++) {
-              if (i !== j) {
-                links.push({
-                  source: i+1,
-                  target: j+1,
-                  weight: data.distances[i][j]
-                });
-              }
-            }
-          }
+    // วาดเส้นใหม่บนแผนที่
+    currentRouteLayer = L.polyline(latlngs, { color: 'blue', weight: 5 }).addTo(map);
+    map.fitBounds(currentRouteLayer.getBounds());
 
-          const result = { nodes, links };
-          let path = solveTSP(nodes, links);
-          alert(path.path);
-        } catch (err) {
-          console.error('OSRM Error:', err);
-          alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
-        }
+
+    // ดึง waypoint ตามลำดับ optimized
+    const orderedWaypoints = trip.waypoints
+      .sort((a, b) => a.waypoint_index - b.waypoint_index)
+      .map((wp, i) => ({
+        id: i + 1,
+        lat: wp.location[1],
+        lng: wp.location[0],
+        name: wp.name || `Node ${i + 1}`
+      }));
+
+    // แสดงเส้นทางบน map ด้วย polyline
+    // const routeCoordinates = L.Polyline.fromEncoded(trip.trips[0].geometry); // ต้องใช้ polyline decoder
+    // routeCoordinates.addTo(map);
+
+    // สร้าง links แบบ directed + weight จาก legs
+    const links = [];
+    trip.trips[0].legs.forEach((leg, i) => {
+      const source = i + 1;
+      const target = (i + 1) % orderedWaypoints.length + 1; // wrap-around กลับ start
+      links.push({
+        source,
+        target,
+        weight: leg.distance
       });
     });
-    function solveTSP(nodes, links) {
-        const n = nodes.length;
-        const dist = Array.from({ length: n }, () => Array(n).fill(Infinity));
 
-        // สร้าง distance matrix
-        links.forEach(l => {
-            dist[l.source-1][l.target-1] = l.weight;
-        });
-
-        const visited = Array(n).fill(false);
-        const path = [0]; // เริ่มจาก Node 1
-        visited[0] = true;
-
-        for (let step = 1; step < n; step++) {
-            const last = path[path.length-1];
-            let next = -1;
-            let minDist = Infinity;
-            for (let j = 0; j < n; j++) {
-            if (!visited[j] && dist[last][j] < minDist) {
-                minDist = dist[last][j];
-                next = j;
-            }
-            }
-            if (next >= 0) {
-            path.push(next);
-            visited[next] = true;
-            }
-        }
-
-        path.push(0); // กลับ Node 1
-
-        // รวม distance
-        let totalDist = 0;
-        for (let i = 0; i < path.length-1; i++) {
-            totalDist += dist[path[i]][path[i+1]];
-        }
-
-        return { path: path.map(i => i+1), totalDistance: totalDist };
-    }
+    console.log({ nodes: orderedWaypoints, links });
+    alert('เส้นทาง optimized ถูกสร้างแล้ว ดู console สำหรับรายละเอียด');
+  } catch (err) {
+    console.error('OSRM Error:', err);
+    alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
+  }
+});
+    });
 
   </script>
 </body>
-
 </html>
