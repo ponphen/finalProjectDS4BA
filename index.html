@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Map — เลือกจุดบนแผนที่ (Leaflet + OSM + OSRM Matrix)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html,body,#map { height: 100%; margin: 0; padding: 0; }
+    .sidebar {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      background: rgba(255,255,255,0.95); border-radius: 8px; padding: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+      width: 320px; max-height: calc(100% - 40px); overflow: auto;
+    }
+    .btn { display:inline-block; padding:6px 10px; border-radius:6px; background:#1976d2; color:#fff; text-decoration:none; cursor:pointer; margin-right:6px; font-size:13px; }
+    .btn.ghost { background:transparent; color:#1976d2; border:1px solid rgba(25,118,210,0.12); }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="sidebar">
+    <h3>เลือกจุดบนแผนที่</h3>
+    <p>คลิกบนแผนที่เพื่อเพิ่มจุด</p>
+    <button class="btn" id="locate">Locate Me</button>
+    <button class="btn ghost" id="clearAll">Clear</button>
+    <button class="btn" id="submitBtn" style="display:none; background:#388e3c;">Submit</button>
+    <ol id="points"></ol>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const map = L.map('map').setView([13.736717, 100.523186], 12);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      const markers = [];
+      const pointsList = document.getElementById('points');
+      const submitBtn = document.getElementById('submitBtn');
+
+      function addMarker(latlng) {
+        const marker = L.marker(latlng, { draggable: true }).addTo(map);
+        marker.on('dragend', updateList);
+        markers.push(marker);
+        updateList();
+      }
+
+      function updateList() {
+        pointsList.innerHTML = '';
+        markers.forEach((marker, i) => {
+          const li = document.createElement('li');
+          const { lat, lng } = marker.getLatLng();
+          li.textContent = `${i+1}: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+          li.ondblclick = () => { map.removeLayer(marker); markers.splice(i, 1); updateList(); };
+          pointsList.appendChild(li);
+        });
+        submitBtn.style.display = markers.length >= 2 ? 'inline-block' : 'none';
+      }
+
+      map.on('click', e => addMarker(e.latlng));
+
+      document.getElementById('locate').addEventListener('click', () => {
+        map.locate({ setView: true, maxZoom: 16 });
+      });
+      map.on('locationfound', e => addMarker(e.latlng));
+
+      document.getElementById('clearAll').addEventListener('click', () => {
+        markers.forEach(m => map.removeLayer(m));
+        markers.length = 0;
+        updateList();
+      });
+
+      // Submit button logic
+      submitBtn.addEventListener('click', async () => {
+        if (markers.length < 2) return;
+
+        const coords = markers.map(m => `${m.getLatLng().lng},${m.getLatLng().lat}`).join(';');
+        const url = `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
+
+        try {
+          const res = await fetch(url);
+          const data = await res.json();
+
+          if (!data.distances) {
+            console.error('No matrix found:', data);
+            alert('ไม่พบข้อมูลระยะทางจาก OSRM');
+            return;
+          }
+
+          const nodes = markers.map((m, i) => ({ id: i+1, lat: m.getLatLng().lat, lng: m.getLatLng().lng }));
+          const links = [];
+
+          for (let i = 0; i < data.distances.length; i++) {
+            for (let j = 0; j < data.distances.length; j++) {
+              if (i !== j) {
+                links.push({
+                  source: i+1,
+                  target: j+1,
+                  weight: data.distances[i][j]
+                });
+              }
+            }
+          }
+
+          const result = { nodes, links };
+          console.log('Full directed graph data (all combinations):', result);
+          alert('สร้างข้อมูล Node-Link (ทุกคู่ทั้งไปและกลับ) เสร็จสิ้น ดูผลได้ใน Console');
+          console.log(solveTSP(nodes, links));
+        } catch (err) {
+          console.error('OSRM Error:', err);
+          alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
+        }
+      });
+    });
+    function solveTSP(nodes, links) {
+        const n = nodes.length;
+        const dist = Array.from({ length: n }, () => Array(n).fill(Infinity));
+
+        // สร้าง distance matrix
+        links.forEach(l => {
+            dist[l.source-1][l.target-1] = l.weight;
+        });
+
+        const visited = Array(n).fill(false);
+        const path = [0]; // เริ่มจาก Node 1
+        visited[0] = true;
+
+        for (let step = 1; step < n; step++) {
+            const last = path[path.length-1];
+            let next = -1;
+            let minDist = Infinity;
+            for (let j = 0; j < n; j++) {
+            if (!visited[j] && dist[last][j] < minDist) {
+                minDist = dist[last][j];
+                next = j;
+            }
+            }
+            if (next >= 0) {
+            path.push(next);
+            visited[next] = true;
+            }
+        }
+
+        path.push(0); // กลับ Node 1
+
+        // รวม distance
+        let totalDist = 0;
+        for (let i = 0; i < path.length-1; i++) {
+            totalDist += dist[path[i]][path[i+1]];
+        }
+
+        return { path: path.map(i => i+1), totalDistance: totalDist };
+    }
+
+  </script>
+</body>
+</html>
