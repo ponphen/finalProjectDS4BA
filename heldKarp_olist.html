@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Map — เลือกจุดบนแผนที่ (Leaflet + OSM + OSRM Matrix)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html,body,#map { height: 100%; margin: 0; padding: 0; }
+    .sidebar {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      background: rgba(255,255,255,0.95); border-radius: 8px; padding: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+      width: 420px; max-height: calc(100% - 40px); overflow: auto;
+    }
+    .btn { display:inline-block; padding:6px 10px; border-radius:6px; background:#1976d2; color:#fff; text-decoration:none; cursor:pointer; margin-right:6px; font-size:13px; }
+    .btn.ghost { background:transparent; color:#1976d2; border:1px solid rgba(25,118,210,0.12); }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="sidebar">
+    
+    <label for="maxDistanceperCar">ระยะทางสูงสุดของรถแต่ละคัน (km):</label>
+    <input id="maxDistanceperCar" type="number" min="1" step="0.1" value="3000" placeholder="เช่น 50" />
+
+    <label for="numCar">จำนวนรถทั้งหมด:</label>
+    <input id="numCar" type="number" min="1" step="1" value="1000" placeholder="เช่น 3" /><Br>
+    <h3>เลือกวันที่</h3>
+    <input type="date" id="datePicker">
+    <button class="btn" id="submitBtn" style="background:#388e3c; color:white; margin-top:10px;">Submit</button>
+    <ol id="points"></ol>
+  </div>
+    <script>
+      const datePicker = document.getElementById('datePicker');
+
+      // สร้าง callback function ชื่อ "callback"
+      function setDate(data) {
+          const dates = data.date;
+          if (dates.length > 0) {
+              const startDate = dates[0];
+              const endDate = dates[dates.length - 1];
+
+              datePicker.min = startDate;
+              datePicker.max = endDate;
+              datePicker.value = startDate;
+          }
+      }
+    </script>
+    </script>
+    <script src="heldKarp.js"></script>  
+    <script src="kmeans.js"></script>  
+    <script src="transparentFunc.js"></script>  
+    <script src="unique_dates_sorted.js"></script>  
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>  
+    <script src="https://cdn.jsdelivr.net/npm/@mapbox/polyline@1.1.1/src/polyline.js"></script>
+
+    <script>
+let markers = [];
+let map; // map ของ leaflet
+let currentRouteLayer = [];
+let startPoint = [-23.5964588,-46.6886217]
+const pointsList = document.getElementById('points');
+// สร้าง map
+document.addEventListener('DOMContentLoaded', function() {
+    
+    map = L.map('map').setView(startPoint, 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+    document.getElementById('submitBtn').click();
+});
+
+// ฟังก์ชันสำหรับโหลด marker จาก lat/lng
+function addMarker(lat, lng, label) {
+  console.log(lat, lng, label);
+    // const marker = L.marker([lat, lng]).addTo(map);
+    const index = markers.length + 1; 
+        const marker = L.marker([lat, lng], { 
+            draggable: false,
+            icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div style="background:#1976d2;color:#fff;border-radius:50%;width:24px;height:24px;line-height:24px;text-align:center;font-size:12px;">${index}</div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+            })
+        }).addTo(map);
+    if(label) marker.bindPopup(label);
+    markers.push(marker);
+}
+
+// ฟังก์ชันล้าง marker เดิม
+function clearMarkers() {
+    markers.forEach(m => map.removeLayer(m));
+    if (typeof currentRouteLayer !== 'undefined' && currentRouteLayer !== null) {
+      // currentRouteLayer มีอยู่แล้ว
+      currentRouteLayer.forEach(layer => map.removeLayer(layer));
+      currentRouteLayer = []; // reset
+    }
+    markers = [];
+}
+
+// ฟังก์ชัน callback จาก JSONP
+function loadOrders(data) {
+  
+    const datePicker = document.getElementById('datePicker');
+    
+    document.getElementById('submitBtn').addEventListener('click', async () => {
+        clearMarkers();
+        const selectedDate = datePicker.value;
+
+        if(!selectedDate) return alert('กรุณาเลือกวันที่');
+
+        const dayData = data.orders.find(d => d.date === selectedDate);
+        if(!dayData) return alert('ไม่พบข้อมูลสำหรับวันที่นี้');
+        console.log(dayData);
+        addMarker(startPoint[0], startPoint[1], `start point`);
+        // วาง marker ทุกจุดจาก orders
+        dayData.detail.forEach(zipEntry => {
+          
+            addMarker(zipEntry.lat, zipEntry.long, `Zip: ${zipEntry.prefixZip}, Orders: ${zipEntry.detail.length}`);
+        });
+
+        // fit map
+        if(markers.length > 0) {
+            const group = new L.featureGroup(markers);
+            map.fitBounds(group.getBounds());
+        }
+
+        if (markers.length < 2) return;
+        map.off('click');
+        
+        const coords = markers.map(m => `${m.getLatLng().lng},${m.getLatLng().lat}`).join(';');
+        const url = `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=distance`;
+        const colorLst = ["#ff0000", "#ffa500", "#000000", "#ffff00", "#800080", "#a52a2a"];
+        try {
+            const res = await fetch(url);
+            const data = await res.json();
+
+            if (!data.distances) {
+            console.error('No matrix found:', data);
+            alert('ไม่พบข้อมูลระยะทางจาก OSRM');
+            return;
+            }
+
+            const nodes = markers.map((m, i) => ({
+            id: i + 1,
+            lat: m.getLatLng().lat,
+            lng: m.getLatLng().lng
+            }));
+
+            const links = [];
+            data.distances.forEach((row, i) => {
+            row.forEach((dist, j) => {
+                if (i !== j) {
+                links.push({
+                    source: i + 1,
+                    target: j + 1,
+                    weight: dist
+                });
+                }
+            });
+            });
+
+            // ===== ทดลอง cluster =====
+            const maxNumCarInput = document.getElementById('numCar');
+            const maxNumCar = parseFloat(maxNumCarInput.value);
+            const maxK = Math.min(maxNumCar, nodes.length - 1);
+            let bestMaxDis = Infinity;
+            let bestPath = [];
+            
+            for (let k = 1; k <= maxK; k++) {
+                const { clusters } = kmeans(nodes.slice(1), k); // ไม่รวม node[0] ถ้าเป็น start point
+                let maxDistance = 0;
+                console.log(`\n📦 K=${k} clusters:`);
+                let tmpPath = [];
+                for (let c = 0; c < k; c++) {
+                    // nodes ใน cluster c (รวม start node)
+                    const groupNodes = [nodes[0], ...nodes.slice(1).filter((_, i) => clusters[i] === c)];
+
+                    // ดึงเฉพาะ link ที่อยู่ในกลุ่มนี้
+                    const subLinks = links.filter(
+                    l => groupNodes.some(n => n.id === l.source) && groupNodes.some(n => n.id === l.target)
+                    );
+
+                    // สร้าง sub-matrix เฉพาะกลุ่มนี้
+                    const subMatrix = groupNodes.map(from =>
+                    groupNodes.map(to => {
+                        if (from.id === to.id) return 0;
+                        const found = subLinks.find(l => l.source === from.id && l.target === to.id);
+                        return found ? found.weight : Infinity;
+                    })
+                    );
+
+                    // รวมระยะทางรวมใน cluster นี้
+                    // const totalDist = subLinks.reduce((s, l) => s + l.weight, 0);
+                    console.log(`Cluster ${c + 1}: ${groupNodes.length} จุด`);
+                    const { cost, tour } = heldKarp(subMatrix);
+                    let tourArray = [];
+                    if (typeof tour === 'string') {
+                    tourArray = tour.split(',').map(Number);
+                    } else if (Array.isArray(tour)) {
+                    tourArray = tour;
+                    } else {
+                    console.warn('Unexpected tour format:', tour);
+                    }
+
+                    // แปลง index ภายใน cluster -> node id จริง
+                    const mappedTour = tourArray.map(i => groupNodes[i].id);
+                    tmpPath.push(mappedTour);
+                    console.log("ระยะทาง : "+cost);
+                    console.log("เส้นทาง : "+mappedTour);
+                    
+                    maxDistance = Math.max(maxDistance, cost);
+                }
+                console.log("ระยะทางสูงสุดของ k = "+k+" : "+maxDistance/1000);
+                const maxDistanceInput = document.getElementById('maxDistanceperCar');
+                const maxDistanceperCar = parseFloat(maxDistanceInput.value);
+                if(bestMaxDis > maxDistance/1000){
+                  bestMaxDis = maxDistance/1000;
+                  bestPath = tmpPath;
+                }
+                
+
+                if(maxDistanceperCar >= maxDistance/1000 || k == maxK){
+                    // console.log("node group : "+tmpNode);
+                    console.log("path group : "+bestPath);
+                    console.log("path group : "+bestPath.length);
+                    console.log(nodes);
+                    pointsList.innerHTML = ''; // ล้างของเก่า
+
+                    for (let t = 0; t < bestPath.length; t++) {
+                        const tour = bestPath[t];
+
+                        // สร้าง div กลุ่มสำหรับแต่ละ cluster / tour
+                        const clusterDiv = document.createElement('div');
+                        clusterDiv.style.marginBottom = '12px';
+                        clusterDiv.style.padding = '8px';
+                        clusterDiv.style.border = '1px solid #1976d2';
+                        clusterDiv.style.borderRadius = '6px';
+                        // clusterDiv.style.background = '#e3f2fd';
+                        clusterDiv.style.background = transparent(colorLst[t%colorLst.length]);
+                        
+
+                        // หัวข้อ cluster
+                        const title = document.createElement('strong');
+                        title.textContent = `Cluster ${t + 1} (Node ${tour.length - 1} จุด)`;
+                        clusterDiv.appendChild(title);
+
+                        // ระยะทางรวม cluster
+                        let clusterDistance = 0;
+
+                        // สร้างลำดับเส้นทาง + leg distance
+                        const tourSpan = document.createElement('div');
+                        tourSpan.style.marginTop = '6px';
+                        
+                        for (let i = 0; i < tour.length - 1; i++) {
+                            const fromNode = nodes[tour[i]-1];
+                            const toNode = nodes[tour[i+1]-1];
+                            const routeUrl = `https://router.project-osrm.org/route/v1/driving/${fromNode.lng},${fromNode.lat};${toNode.lng},${toNode.lat}?overview=full&geometries=polyline`;
+
+                            const routeRes = await fetch(routeUrl);
+                            const routeData = await routeRes.json();
+
+                            if (routeData.routes && routeData.routes.length > 0) {
+                                const legDistance = routeData.routes[0].distance; // meters
+                                clusterDistance += legDistance;
+
+                                // วาดเส้นทางบน map
+                                const decoded = polyline.decode(routeData.routes[0].geometry, 6);
+                                const latlngs = decoded.map(([lat, lon]) => [lat*10, lon*10]);
+                                currentRouteLayer.push(L.polyline(latlngs, { color: colorLst[t%colorLst.length], weight: 4 }).addTo(map));
+
+                                // สร้าง span ของ node
+                                const nodeSpan = document.createElement('span');
+                                nodeSpan.textContent = fromNode.id;
+                                nodeSpan.style.padding = '2px 6px';
+                                nodeSpan.style.marginRight = '4px';
+                                nodeSpan.style.borderRadius = '4px';
+                                nodeSpan.style.background = '#1976d2';
+                                nodeSpan.style.color = '#fff';
+                                nodeSpan.style.fontSize = '13px';
+                                nodeSpan.style.fontWeight = '500';
+                                tourSpan.appendChild(nodeSpan);
+
+                                // arrow + leg distance
+                                const arrow = document.createElement('span');
+                                arrow.textContent = `→`;
+                                arrow.style.marginRight = '4px';
+                                tourSpan.appendChild(arrow);
+
+                                // ถ้าเป็น node สุดท้ายของ tour
+                                if (i === tour.length - 2) {
+                                    const lastNodeSpan = document.createElement('span');
+                                    lastNodeSpan.textContent = toNode.id;
+                                    lastNodeSpan.style.padding = '2px 6px';
+                                    lastNodeSpan.style.marginRight = '4px';
+                                    lastNodeSpan.style.borderRadius = '4px';
+                                    lastNodeSpan.style.background = '#1976d2';
+                                    lastNodeSpan.style.color = '#fff';
+                                    lastNodeSpan.style.fontSize = '13px';
+                                    lastNodeSpan.style.fontWeight = '500';
+                                    tourSpan.appendChild(lastNodeSpan);
+                                }
+                            }
+                        }
+
+                        // แสดงระยะทางรวม cluster
+                        const distDiv = document.createElement('div');
+                        distDiv.textContent = `ระยะทางรวม Cluster: ${(clusterDistance/1000).toFixed(2)} km`;
+                        distDiv.style.marginTop = '6px';
+                        distDiv.style.fontStyle = 'italic';
+                        clusterDiv.appendChild(tourSpan);
+                        clusterDiv.appendChild(distDiv);
+
+                        pointsList.appendChild(clusterDiv);
+                    }
+                    break;
+                }
+            }
+        } catch (err) {
+            console.error('OSRM Error:', err);
+            alert('เกิดข้อผิดพลาดในการดึงข้อมูลจาก OSRM');
+        }
+    });
+    
+}
+</script>
+
+<script src="nested_orders.js"></script>
+</body>
+</html>
